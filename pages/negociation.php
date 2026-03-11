@@ -38,18 +38,56 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $nego && $nego['statut'] === 'en_co
     $pdo = getPDO();
     $action = $_POST['action'] ?? '';
 
-    // Accepter l'offre (vendeur)
-    if ($action === 'accepter' && $userId == $nego['vendeur_id']) {
-        try {
-            $derniere = end($offres);
-            $pdo->prepare("UPDATE negociations SET statut='acceptee' WHERE id=?")->execute([$negoId]);
-            $pdo->prepare("UPDATE offres_negociation SET statut='acceptee' WHERE id=?")->execute([$derniere['id']]);
-            $pdo->prepare("INSERT INTO panier (acheteur_id, item_id, type_achat, prix_final) VALUES (?,?,?,?)")
-                ->execute([$nego['acheteur_id'], $nego['item_id'], 'negociation', $derniere['montant']]);
-            notify($nego['acheteur_id'], "🎉 Le vendeur a accepté votre offre de ".formatPrice((float)$derniere['montant'])." pour « {$nego['item_nom']} » ! L'article a été ajouté à votre panier.", 'negociation');
-            $msg = '<div class="alert alert-success">✅ Offre acceptée ! L\'article a été ajouté au panier de l\'acheteur.</div>';
-        } catch(Exception $e) { $msg = '<div class="alert alert-error">'.$e->getMessage().'</div>'; }
+   // Accepter l'offre (vendeur)
+if ($action === 'accepter' && $userId == $nego['vendeur_id']) {
+    try {
+        $pdo = getPDO();
+        $pdo->beginTransaction(); // Sécurité : tout passe ou rien ne passe
+
+        $derniere = end($offres);
+        $montantFinal = (float)$derniere['montant'];
+
+        // 1. On valide la négociation
+        $pdo->prepare("UPDATE negociations SET statut='acceptee' WHERE id=?")->execute([$negoId]);
+        $pdo->prepare("UPDATE offres_negociation SET statut='acceptee' WHERE id=?")->execute([$derniere['id']]);
+
+        // 2. On rend l'article indisponible immédiatement
+        $pdo->prepare("UPDATE items SET statut='vendu' WHERE id=?")->execute([$nego['item_id']]);
+
+        // 3. RÉCUPÉRATION DES INFOS DE PAIEMENT DE L'ACHETEUR (pour l'historique de la commande)
+        // On cherche sa dernière carte utilisée ou une valeur par défaut
+        $stmtPay = $pdo->prepare("SELECT type_carte, num_carte_masked FROM commandes WHERE acheteur_id = ? ORDER BY created_at DESC LIMIT 1");
+        $stmtPay->execute([$nego['acheteur_id']]);
+        $card = $stmtPay->fetch() ?: ['type_carte' => 'Visa', 'num_carte_masked' => '**** **** **** 0000'];
+
+        // 4. PAIEMENT AUTOMATIQUE : Création de la commande immédiate
+        $sqlCmd = "INSERT INTO commandes (acheteur_id, montant_total, statut, adresse_livraison, type_carte, num_carte_masked) 
+                   VALUES (?, ?, 'payee', ?, ?, ?)";
+        $pdo->prepare($sqlCmd)->execute([
+            $nego['acheteur_id'],
+            $montantFinal,
+            "Livraison suite à négociation conclue", // Ou récupérer l'adresse de l'acheteur
+            $card['type_carte'],
+            $card['num_carte_masked']
+        ]);
+        
+        $commandeId = $pdo->lastInsertId();
+
+        // 5. Ajout de l'item à la commande
+        $pdo->prepare("INSERT INTO commande_items (commande_id, item_id, prix) VALUES (?, ?, ?)")
+            ->execute([$commandeId, $nego['item_id'], $montantFinal]);
+
+        // 6. Notification à l'acheteur
+        notify($nego['acheteur_id'], "💸 Paiement automatique effectué ! Le vendeur a accepté votre offre de ".formatPrice($montantFinal).". L'article est maintenant payé et en cours de livraison.", 'negociation');
+
+        $pdo->commit();
+        $msg = '<div class="alert alert-success">✅ Offre acceptée. Le paiement de l\'acheteur a été prélevé automatiquement !</div>';
+        
+    } catch(Exception $e) { 
+        $pdo->rollBack();
+        $msg = '<div class="alert alert-error">Erreur lors du paiement auto : '.$e->getMessage().'</div>'; 
     }
+}
 
     // Refuser
     if ($action === 'refuser' && $userId == $nego['vendeur_id']) {

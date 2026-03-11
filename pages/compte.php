@@ -16,6 +16,9 @@ try {
     $user = $pdo->prepare("SELECT * FROM users WHERE id=?");
     $user->execute([$userId]);
     $user = $user->fetch();
+    $stmtPay = $pdo->prepare("SELECT type_carte, num_carte_masked FROM commandes WHERE acheteur_id = ? AND statut != 'annulee' ORDER BY created_at DESC LIMIT 1");
+    $stmtPay->execute([$userId]);
+    $infoPaiement = $stmtPay->fetch();
 
     $commandes = $pdo->prepare("
         SELECT c.*, COUNT(ci.id) AS nb_items
@@ -45,6 +48,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'updat
         $pdo = getPDO();
         $pdo->prepare("UPDATE users SET nom=?,prenom=?,adresse1=?,adresse2=?,ville=?,code_postal=?,pays=?,telephone=? WHERE id=?")
             ->execute([$_POST['nom'],$_POST['prenom'],$_POST['adresse1'],$_POST['adresse2']??'',$_POST['ville'],$_POST['code_postal'],$_POST['pays'],$_POST['telephone'],$userId]);
+
+            $uploadDir = '../uploads/users/';
+        if (!is_dir($uploadDir)) mkdir($uploadDir, 0777, true);
+
+        // On traite 'photo' et 'image_fond'
+        foreach (['photo', 'image_fond'] as $champ) {
+            if (!empty($_FILES[$champ]['name'])) {
+                $extension = pathinfo($_FILES[$champ]['name'], PATHINFO_EXTENSION);
+                $nouveauNom = $champ . '_' . $userId . '_' . time() . '.' . $extension;
+                
+                if (move_uploaded_file($_FILES[$champ]['tmp_name'], $uploadDir . $nouveauNom)) {
+                    $pdo->prepare("UPDATE users SET $champ = ? WHERE id = ?")->execute([$nouveauNom, $userId]);
+                    $user[$champ] = $nouveauNom; // Mise à jour pour l'affichage immédiat
+                }
+            }
+        }
+
         if ($_POST['password'] ?? '') {
             if (strlen($_POST['password']) < 8) { $msg = '<div class="alert alert-error">Mot de passe trop court.</div>'; }
             else { $pdo->prepare("UPDATE users SET password=? WHERE id=?")->execute([password_hash($_POST['password'],PASSWORD_BCRYPT),$userId]); }
@@ -102,6 +122,33 @@ include '../php/header.php';
 
     <?php if ($tab === 'profil'): ?>
     <h1 class="dash-title">Mon Profil</h1>
+    <div style="margin-bottom: 30px; position: relative;">
+        <div style="height: 180px; width: 100%; border-radius: 12px; background: #eee url('../uploads/users/<?= e($user['image_fond'] ?? 'default-bg.jpg') ?>') center/cover no-repeat; border: 1px solid #ddd;"></div>
+        
+        <div style="position: absolute; bottom: -20px; left: 30px; display: flex; align-items: flex-end; gap: 15px;">
+            <img src="../uploads/users/<?= e($user['photo'] ?? 'default-avatar.jpg') ?>" 
+                 style="width: 90px; height: 90px; border-radius: 50%; border: 4px solid var(--surface); object-fit: cover; background: #fff; shadow: var(--shadow);">
+            <div style="margin-bottom: 15px;">
+                <h2 style="margin:0; font-size: 20px;"><?= e($user['prenom'] . ' ' . $user['nom']) ?></h2>
+                <span class="text-muted">@<?= e($user['pseudo']) ?></span>
+            </div>
+        </div>
+    </div>
+
+    <div style="max-width:640px;background:var(--surface);border-radius:var(--radius);padding:40px;box-shadow:var(--shadow); margin-top: 40px;">
+      <form method="POST" enctype="multipart/form-data">
+        <input type="hidden" name="action" value="update_profil">
+        
+        <div class="form-row">
+            <div class="form-group">
+                <label class="form-label">📸 Changer la photo de profil</label>
+                <input type="file" name="photo" class="form-control" accept="image/*">
+            </div>
+            <div class="form-group">
+                <label class="form-label">🖼️ Changer l'image de fond</label>
+                <input type="file" name="image_fond" class="form-control" accept="image/*">
+            </div>
+        </div>
     <p class="dash-subtitle">Gérez vos informations personnelles</p>
 
     <div style="max-width:640px;background:var(--surface);border-radius:var(--radius);padding:40px;box-shadow:var(--shadow)">
@@ -152,6 +199,35 @@ include '../php/header.php';
             <label class="form-label">Téléphone</label>
             <input type="tel" name="telephone" class="form-control" value="<?= e($user['telephone'] ?? '') ?>">
           </div>
+            <div style="background:#f8fafc; padding:20px; border-radius:10px; margin:30px 0; border:1px solid #e2e8f0;">
+                <label style="display:block; font-size:11px; color:#64748b; font-weight:bold; text-transform:uppercase; margin-bottom:10px;">💳 Informations de paiement</label>
+                <?php if ($infoPaiement): ?>
+                    <div style="display:flex; align-items:center; gap:15px;">
+                        <div style="background:#fff; padding:5px 10px; border-radius:5px; border:1px solid #cbd5e1; font-weight:bold; font-size:12px;">
+                            <?= e($infoPaiement['type_carte']) ?>
+                        </div>
+                        <div style="font-family:monospace; font-size:16px; color:#1e293b;">
+                            <?= e($infoPaiement['num_carte_masked']) ?>
+                        </div>
+                        <span style="margin-left:auto; font-size:12px; color:#10b981;">● Moyen de paiement actif</span>
+                    </div>
+                <?php else: ?>
+                    <div style="color:#94a3b8; font-style:italic; font-size:14px;">
+                        Aucune carte enregistrée. Elle sera mémorisée lors de votre prochain achat.
+                    </div>
+                <?php endif; ?>
+            </div>
+        
+
+            <div style="background:#fff5f5; border:1px solid #feb2b2; padding:20px; border-radius:10px; margin-bottom:50px;">
+                <p style="color:#c53030; font-size:13px; line-height:1.5; margin-bottom:15px;">
+                    <strong>Contrat légal :</strong> S’il/Elle fait une offre sur un article, il/elle est sous contrat légal pour l'acheter si le vendeur accepte l'offre.
+                </p>
+                <label style="display:flex; align-items:center; gap:10px; cursor:pointer; font-weight:bold;">
+                    <input type="checkbox" name="accept_clause" value="1" <?= ($user['clause_acceptee'] ?? 0) ? 'checked' : '' ?> required style="width:18px; height:18px;">
+                    J'accepte les termes du contrat d'achat Omnes MarketPlace.
+                </label>
+            </div>
         </div>
         <hr class="divider">
         <h4 style="font-size:15px;font-weight:600;margin-bottom:16px">Changer le mot de passe</h4>
